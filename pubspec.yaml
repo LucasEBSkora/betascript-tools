@@ -1,0 +1,3 @@
+name: betascript_formatter
+dependencies:
+  meta: ^1.1.8

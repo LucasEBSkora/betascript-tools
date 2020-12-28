@@ -1,0 +1,11 @@
+  let i =
+              0;
+              i < 10; i = i + 1 
+  let f(
+    x
+    ) =  
+    x^
+    
+                                i
+ del (f) /
+   del (x)
