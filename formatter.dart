@@ -2,7 +2,6 @@ import 'dart:collection' show Queue;
 import 'dart:io';
 
 import 'file_formatter.dart';
-import 'formatter_parser.dart';
 import 'formatter_scanner.dart';
 import '../betascript/source/interpreter/token.dart';
 
@@ -70,7 +69,7 @@ class Formatter {
       }
     }
     _indent ??= "  ";
-    _maxLineLength ??= 120;
+    _maxLineLength ??= 80;
   }
 
   void format() {
@@ -97,14 +96,11 @@ class Formatter {
     }
 
     final scanner = FormatterScanner(file.readAsStringSync(), errorCallback);
-    final tokens = scanner.scanTokens(); //lexical analysis
+    final tokens = scanner.scanTokens(); 
     if (hadError) return;
     for (Token token in tokens) print(token);
-    final parser = FormatterParser(tokens, errorCallback);
-    final statements = parser.parse(); //Syntax analysis
-    if (hadError) return;
     final formattedResult =
-        FileFormatter(statements, _indent, _maxLineLength).format();
+        FileFormatter(tokens, _indent, _maxLineLength).format();
     // print(formattedResult);
     if (formattedResult != null) file.writeAsStringSync(formattedResult);
   }

@@ -1,79 +1,93 @@
-import 'formatter_parser.dart' show ForStmt;
-import '../betascript/source/interpreter/expr.dart';
-import '../betascript/source/interpreter/stmt.dart';
-import '../betascript/source/interpreter/token.dart';
-import 'formatter_parser.dart';
+import 'dart:collection' show Queue;
 
-class FileFormatter implements StmtVisitor, ExprVisitor {
-  final List<Stmt> _statements;
+import '../betascript/source/interpreter/token.dart';
+
+//represents what we are currently "parsing"
+//(but only for things that will change the behavior)
+enum Parsing { setExpr, blockStmt, forclause, nothing }
+
+class FileFormatter {
+  final List<Token> _tokens;
   final String _indent;
   int _indentLevel = 0;
+  int _index = 0;
   final int _maxLineLength;
   List<String> result = <String>[];
+  String _retStr = "";
+  String _currentLine = "";
+  Queue<Parsing> _stack = Queue();
+  //represents last thing we finished parsing. Used to check if a '-' after a '}' is binary or unary
+  Parsing _lastParsed = Parsing.nothing;
+  int _unclosedParenthesesInForClause;
 
-  //be careful never to set this to something which is a valid character
-  ///represents place where ' ' or a linebreak must be inserted
-  static const String _whitespace = "\$";
-
-  ///represents place where a linebreak must be inserted
-  static const String _optionalLinebreak = "%";
-
-  //obligatory linebreak (needs to remember to register that it went to next line)
-  static const String _linebreak = "\n";
-
-  ///represents place where a linebreak or semicolon must be inserted
-  ///(the valid terminators in ΒScript)
-  static const String _terminator = "\n;";
-  FileFormatter(this._statements, this._indent, this._maxLineLength);
-
-  List<String> _visitStmt(Stmt s) => s.accept(this);
-
-  List<String> _visitExpr(Expr e) => e.accept(this);
-
-  String format() {
-    for (var stmt in _statements) result.addAll(_visitStmt(stmt));
-    var retStr = "";
-    var currentLine = "";
-    final len = result.length;
-    for (var i = 0; i < len; ++i) {
-      final frag = result[i];
-      final next = (i + 1 < len) ? result[i + 1] : "";
-      if (frag == _whitespace) {
-        if (currentLine.length + 1 + next.length >= _maxLineLength) {
-          retStr += "$currentLine\n";
-          currentLine = "";
-        } else
-          currentLine += " ";
-      } else if (frag == _optionalLinebreak) {
-        if (currentLine.length + next.length >= _maxLineLength) {
-          retStr += "$currentLine\n";
-          currentLine = "";
-        } else if (frag == _linebreak) {
-          retStr += "$currentLine\n";
-          currentLine = "";
-        }
-      } else if (frag == _terminator) {
-        retStr += "$currentLine\n";
-        currentLine = "";
-      } else
-        currentLine += frag;
-    }
-    return retStr + currentLine;
+  FileFormatter(this._tokens, this._indent, this._maxLineLength) {
+    _stack.add(Parsing.nothing);
   }
 
-  @override
-  Object visitAssignExpr(AssignExpr e) =>
-      <String>[e.name.lexeme, " =", _whitespace, ..._visitExpr(e.value)];
+  String format() {
+    for (; _index < _tokens.length; ++_index) {
+      Token token = _tokens[_index];
+      if (token.type == TokenType.lineBreak) {
+        _processLinebreak();
+        continue;
+      }
+      if (token.type == TokenType.EOF) break;
+      _currentLine += _formattedToken(token);
+      _whitespaceFollowing(token);
 
-  @override
-  Object visitBinaryExpr(BinaryExpr e) => <String>[
-        ..._visitExpr(e.left),
-        " ${_operator(e.op)}",
-        _whitespace,
-        ..._visitExpr(e.right)
-      ];
+      if (_tokens[_index].type == TokenType.leftBrace &&
+          _index + 1 < _tokens.length &&
+          _tokens[_index + 1].type == TokenType.rightBrace &&
+          _stack.last == Parsing.blockStmt) {
+        _retStr += '\n';
+      }
+    }
 
-  String _operator(Token t) {
+    return _retStr +
+        _currentLine +
+        ((_currentLine != _indent * _indentLevel) ? '\n' : '');
+  }
+
+  Token get _next =>
+      (_index + 1 < _tokens.length) ? _tokens[_index + 1] : _tokens.last;
+
+  // Token get _previous => _tokens[_index - 1];
+
+  void _whitespaceFollowing(Token token) {
+    if (_demandsLinebreak(token.type) ||
+        (_allowsLinebreak(token.type) &&
+            _currentLine.length + _lengthUntilNextPossibleLinebreak() >=
+                _maxLineLength)) {
+      _processLinebreak();
+    } else if (!_doesntWantWhitespace(token)) _currentLine += ' ';
+  }
+
+  int _lengthUntilNextPossibleLinebreak() {
+    var length = 1;
+    final actualIndentLevel = _indentLevel;
+    final actualStack = _stack;
+    _stack = Queue.from(_stack);
+    final actualIndex = _index;
+    final actualunclosedParenthesesInForClause =
+        _unclosedParenthesesInForClause;
+    for (int i = _index + 1; i < _tokens.length; ++i) {
+      final token = _tokens[i];
+
+      if (token.type == TokenType.lineBreak) break;
+
+      length += _formattedToken(token).length;
+
+      if (_allowsLinebreak(token.type) || _demandsLinebreak(token.type)) break;
+    }
+    _indentLevel = actualIndentLevel;
+    _index = actualIndex;
+    _stack = actualStack;
+    _unclosedParenthesesInForClause = actualunclosedParenthesesInForClause;
+
+    return length;
+  }
+
+  String _formattedToken(Token t) {
     switch (t.type) {
       case TokenType.identicallyEquals:
         return '≡';
@@ -91,305 +105,328 @@ class FileFormatter implements StmtVisitor, ExprVisitor {
         return '∧';
       case TokenType.or:
         return '∨';
+      case TokenType.del:
+        return '∂';
+      case TokenType.leftBrace:
+        ++_indentLevel;
+        _stack.add(_leftBraceType());
+        return '{';
+      case TokenType.rightBrace:
+        if (_stack.last != Parsing.nothing) {
+          _lastParsed = _stack.removeLast();
+        }
+        --_indentLevel;
+        return '}';
+      case TokenType.forToken:
+        _stack.add(Parsing.forclause);
+        _unclosedParenthesesInForClause = 0;
+        return "for";
+      case TokenType.leftParentheses:
+        if (_stack.last == Parsing.forclause) ++_unclosedParenthesesInForClause;
+        return '(';
+      case TokenType.rightParentheses:
+        if (_stack.last == Parsing.forclause &&
+            --_unclosedParenthesesInForClause == 0) {
+          _lastParsed = _stack.removeLast();
+        }
+        return ')';
       default:
         return t.lexeme;
     }
   }
 
-  @override
-  Object visitBlockStmt(BlockStmt s) {
-    if (s.statements?.length == 0 ?? false) return <String>['{}'];
-    if (s.statements.length == 1) {
-      return <String>['{ ', ..._visitStmt(s.statements.single), ' }'];
-    }
-    final retVal = <String>[
-      _indent * _indentLevel++,
-      '{',
-      _linebreak,
-      for (var stmt in s.statements) ..._visitStmt(stmt),
-      _indent * --_indentLevel,
-      '}'
-    ];
+  Parsing _leftBraceType() {
+    var i = _index - 1;
 
-    return retVal;
+    Token previous;
+
+    //finds the previous token, ignoring comments
+    while (i >= 0) {
+      Token aux = _tokens[i];
+      if (aux.type != TokenType.comment &&
+          aux.type != TokenType.hash &&
+          aux.type != TokenType.multilineComment &&
+          aux.type != TokenType.wordComment) {
+        previous = aux;
+        break;
+      }
+      --i;
+    }
+    if (previous.type == TokenType.setToken) return Parsing.setExpr;
+    //if right before the '{' we have a ')', we must be looking at a
+    //for, while or if block
+    if (previous.type == TokenType.rightParentheses) return Parsing.blockStmt;
+    //sets can only have expressions in them, blocks can have expressions and statements
+    var unclosedBraces = 1;
+    for (var i = _index + 1; i < _tokens.length; ++i) {
+      final token = _tokens[i];
+      if (token.type == TokenType.rightBrace) --unclosedBraces;
+      if (unclosedBraces < 1) break;
+
+      if (token.type == TokenType.leftBrace) return Parsing.blockStmt;
+      //break instead of return because this is just returning the assumed default, which
+      //is after the for loop
+
+      if ((token.type == TokenType.comma ||
+              token.type == TokenType.verticalBar) &&
+          unclosedBraces == 1) {
+        return Parsing.setExpr;
+      }
+
+      if (token.type == TokenType.forToken ||
+          token.type == TokenType.whileToken ||
+          token.type == TokenType.ifToken ||
+          token.type == TokenType.elseToken ||
+          token.type == TokenType.classToken ||
+          token.type == TokenType.returnToken ||
+          token.type == TokenType.routine ||
+          token.type == TokenType.print ||
+          token.type == TokenType.let) {
+        return Parsing.blockStmt;
+      }
+    }
+
+    return Parsing.setExpr;
   }
 
-  @override
-  Object visitBuilderDefinitionExpr(BuilderDefinitionExpr e) => <String>[
-        "{",
-        _whitespace,
-        if (e.parameters.isNotEmpty) e.parameters.first.lexeme,
-        for (var parameter in e.parameters.sublist(1)) ...<String>[
-          ',',
-          _whitespace,
-          parameter.lexeme
-        ],
-        '|',
-        _whitespace,
-      ];
-
-  @override
-  Object visitCallExpr(CallExpr e) => <String>[
-        ..._visitExpr(e.callee),
-        '(',
-        _whitespace,
-        for (var arg in e.arguments) ..._visitExpr(arg),
-        ')'
-      ];
-
-  @override
-  Object visitClassStmt(ClassStmt s) => <String>[
-        _indent * _indentLevel++,
-        "class ",
-        s.name.lexeme,
-        if (s.superclass != null) ...[" < ", ..._visitExpr(s.superclass)],
-        " {",
-        _whitespace,
-        //Removes "routine" keyword
-        for (RoutineStmt routine in s.methods)
-          ...(_visitStmt(routine)..removeAt(1)),
-        _indent * --_indentLevel,
-        "}",
-        _linebreak
-      ];
-
-  @override
-  Object visitDerivativeExpr(DerivativeExpr e) => <String>[
-        '∂(',
-        ..._visitExpr(e.derivand),
-        ') /',
-        _whitespace,
-        '∂(',
-        ..._visitExpr(e.variables.first),
-        for (var arg in e.variables.sublist(1)) ...<String>[
-          ',',
-          _whitespace,
-          ..._visitExpr(arg)
-        ],
-        ')'
-      ];
-
-  @override
-  Object visitDirectiveStmt(DirectiveStmt s) => <String>["#", s.directive];
-
-  @override
-  Object visitExpressionStmt(ExpressionStmt s) {
-    final list = <String>[_indent * _indentLevel, ..._visitExpr(s.expression)];
-
-    final retList = <String>[];
-
-    var current = "";
-
-    final _len = list.length;
-    for (var i = 0; i < _len; ++i) {
-      final fragment = list[i];
-      if (fragment == _whitespace || fragment == _optionalLinebreak) {
-        if (current.isNotEmpty) retList.add(current);
-        retList.add(fragment);
-        current = "";
-      } else
-        current += fragment;
-    }
-    if (current.isNotEmpty) retList.add(current);
-    return retList..add(_terminator);
+  bool _demandsLinebreak(TokenType type) {
+    //opening and closing scopes should always trigger a linebreak (at least for now)
+    return ((type == TokenType.leftBrace ||
+                _next.type == TokenType.rightBrace) &&
+            (_stack.last == Parsing.blockStmt)) ||
+        (type == TokenType.rightBrace &&
+            _lastParsed == Parsing.blockStmt &&
+            _next.type != TokenType.elseToken) ||
+        //outside of for statement clauses, semicolons want linebreaks
+        //except if right after it, there is an actual linebreak
+        //(i want to let that token deal with it, because then it is easier to
+        //diferentiate between one and two linebreaks after a semicolon-terminated
+        //statement )
+        (type == TokenType.semicolon &&
+            _stack.last != Parsing.forclause &&
+            _next.type != TokenType.lineBreak);
   }
 
-  @override
-  Object visitGetExpr(GetExpr e) =>
-      <String>[..._visitExpr(e.object), '.', _optionalLinebreak, e.name.lexeme];
+  bool _allowsLinebreak(TokenType type) =>
+      type == TokenType.leftBrace ||
+      type == TokenType.leftParentheses ||
+      type == TokenType.leftBrace ||
+      type == TokenType.comma ||
+      type == TokenType.dot ||
+      type == TokenType.minus ||
+      type == TokenType.plus ||
+      type == TokenType.slash ||
+      type == TokenType.invertedSlash ||
+      type == TokenType.star ||
+      type == TokenType.approx ||
+      type == TokenType.exp ||
+      type == TokenType.verticalBar ||
+      type == TokenType.assigment ||
+      type == TokenType.equals ||
+      type == TokenType.identicallyEquals ||
+      type == TokenType.greater ||
+      type == TokenType.greaterEqual ||
+      type == TokenType.lessEqual ||
+      type == TokenType.less ||
+      type == TokenType.and ||
+      type == TokenType.belongs ||
+      type == TokenType.contained ||
+      type == TokenType.disjoined ||
+      type == TokenType.elseToken ||
+      type == TokenType.intersection ||
+      type == TokenType.not ||
+      type == TokenType.or;
 
-  @override
-  Object visitGroupingExpr(GroupingExpr e) =>
-      <String>['(', _whitespace, ..._visitExpr(e.expression), ' )'];
+  bool _doesntWantWhitespace(Token token) {
+    final next = _next.type;
 
-  @override
-  Object visitIfStmt(IfStmt s) => <String>[
-        _indent * _indentLevel,
-        "if (",
-        _optionalLinebreak,
-        ..._visitExpr(s.condition),
-        ")",
-        _whitespace,
-        ..._visitStmt(s.thenBranch),
-        _whitespace,
-        if (s.elseBranch != null) ...[
-          "else",
-          _whitespace,
-          ..._visitStmt(s.elseBranch),
-          _linebreak
-        ],
-      ];
+    //';', ''' and ',' shouldn't have whitespace before, only after
+    if (next == TokenType.semicolon ||
+        next == TokenType.comma ||
+        next == TokenType.apostrophe) return true;
 
-  @override
-  Object visitIntervalDefinitionExpr(IntervalDefinitionExpr e) => <String>[
-        e.left.lexeme,
-        _whitespace,
-        ..._visitExpr(e.a),
-        ',',
-        _whitespace,
-        ..._visitExpr(e.b),
-        ' ${e.right.lexeme}'
-      ];
+    //calls and derivative expressions
+    if ((token.type == TokenType.identifier || token.type == TokenType.del) &&
+        next == TokenType.leftParentheses) return true;
 
-  @override
-  Object visitLiteralExpr(LiteralExpr e) => <String>[e.value.toString()];
+    if (token.type == TokenType.leftParentheses ||
+        token.type == TokenType.leftSquare ||
+        token.type == TokenType.leftBrace) return true;
+    if (next == TokenType.rightBrace ||
+        next == TokenType.rightParentheses ||
+        next == TokenType.rightSquare) return true;
 
-  @override
-  Object visitLogicBinaryExpr(LogicBinaryExpr e) => <String>[
-        ..._visitExpr(e.left),
-        " ${_operator(e.op)}",
-        _whitespace,
-        ..._visitExpr(e.right)
-      ];
+    //unary left operators shouldn't have whitespace following
+    //thing is, '-' can be both unary and binary, which is a major pain in the ass
+    if (token.type == TokenType.not || token.type == TokenType.approx)
+      return true;
 
-  @override
-  Object visitPrintStmt(PrintStmt s) => <String>[
-        _indent * _indentLevel,
-        "print ",
-        ..._visitExpr(s.expression),
-        _terminator
-      ];
-
-  @override
-  Object visitReturnStmt(ReturnStmt s) => <String>[
-        _indent * _indentLevel,
-        "return ",
-        if (s.value != null) ...[..._visitExpr(s.value), _terminator],
-        if (s.value == null) ...[";", _linebreak]
-      ];
-
-  @override
-  Object visitRosterDefinitionExpr(RosterDefinitionExpr e) => <String>[
-        '{',
-        if (e.elements.length <= 1) _optionalLinebreak,
-        for (var element in e.elements) ...<String>[
-          ..._visitExpr(element),
-          ',',
-          _whitespace
-        ],
-        '}'
-      ];
-
-  @override
-  Object visitRoutineStmt(RoutineStmt s) => <String>[
-        _indent * _indentLevel++,
-        "routine ",
-        s.name.lexeme,
-        " (",
-        _optionalLinebreak,
-        if (s.parameters != null && s.parameters.isNotEmpty) ...[
-          s.parameters.first.lexeme,
-          for (var parameter in s.parameters.sublist(1)) ...[
-            parameter.lexeme,
-            ",",
-            _whitespace
-          ]
-        ],
-        ") {",
-        for (var stmt in s.body) ..._visitStmt(stmt),
-        "}"
-      ];
-
-  @override
-  Object visitSetBinaryExpr(SetBinaryExpr e) => <String>[
-        ..._visitExpr(e.left),
-        " ${_operator(e.operator)}",
-        _whitespace,
-        ..._visitExpr(e.right)
-      ];
-
-  @override
-  Object visitSetExpr(SetExpr e) => <String>[
-        ..._visitExpr(e.object),
-        '.',
-        _optionalLinebreak,
-        e.name.lexeme,
-        ' =',
-        _whitespace,
-        ..._visitExpr(e.value),
-      ];
-
-  @override
-  Object visitSuperExpr(SuperExpr e) =>
-      <String>["super.", _optionalLinebreak, e.method.lexeme];
-
-  @override
-  Object visitThisExpr(ThisExpr e) => <String>["this"];
-
-  @override
-  Object visitUnaryExpr(UnaryExpr e) => _isLeftUnary(e.op.type)
-      ? <String>[_operator(e.op), ..._visitExpr(e.operand)]
-      : <String>[..._visitExpr(e.operand), _operator(e.op)];
-
-  bool _isLeftUnary(TokenType t) {
-    switch (t) {
-      case TokenType.approx:
-        return true;
-      case TokenType.not:
-        return true;
-      case TokenType.minus:
-        return true;
-      default:
-        return false;
-    }
+    if (token.type == TokenType.minus) return _isUnaryMinus();
+    return false;
   }
 
-  @override
-  Object visitVarStmt(VarStmt s) => <String>[
-        _indent * _indentLevel,
-        "let",
-        _whitespace,
-        s.name.lexeme,
-        if (s.parameters?.isNotEmpty ?? false) ...<String>[
-          '(',
-          _optionalLinebreak,
-          s.parameters.first.lexeme,
-          for (var parameter in s.parameters.sublist(1)) ...[
-            parameter.lexeme,
-            ",",
-            _whitespace
-          ],
-          ')'
-        ],
-        " =",
-        _whitespace,
-        if (s.initializer != null) ..._visitExpr(s.initializer),
-        _terminator
-      ];
+  bool _isUnaryMinus() {
+    var i = _index - 1;
 
-  @override
-  Object visitVariableExpr(VariableExpr e) => <String>[e.name.lexeme];
+    Token previous;
 
-  @override
-  Object visitWhileStmt(WhileStmt s) => <String>[
-        _indent * _indentLevel,
-        "while (",
-        _optionalLinebreak,
-        ..._visitExpr(s.condition),
-        ")",
-        ..._visitStmt(s.body),
-      ];
-
-  Object visitForStmt(ForStmt s) {
-    List<String> initializer;
-    if (s.initializer != null) {
-      initializer = _visitStmt(s.initializer);
-      if (initializer.last == _terminator) initializer.removeLast();
+    //finds the previous token, ignoring comments
+    while (i >= 0) {
+      Token aux = _tokens[i];
+      if (aux.type != TokenType.comment &&
+          aux.type != TokenType.hash &&
+          aux.type != TokenType.multilineComment &&
+          aux.type != TokenType.wordComment) {
+        previous = aux;
+        break;
+      }
+      --i;
     }
-    return <String>[
-      _indent * _indentLevel,
-      "for(",
-      if (initializer != null) ...initializer,
-      ";",
-      _whitespace,
-      if (s.condition != null) ..._visitExpr(s.condition),
-      ";",
-      _whitespace,
-      if (s.increment != null) ..._visitExpr(s.increment),
-      ")",
-      ..._visitStmt(s.body)
-    ];
+
+    //if there is no previous non-comment token, this is necessarily unary
+    if (previous == null) return true;
+
+    //if the minus character is unary, the character that precedes it won't
+    //be something that could be part of a previous expression:
+    if (previous.type == TokenType.lineBreak ||
+        previous.type == TokenType.leftBrace ||
+        previous.type == TokenType.leftParentheses ||
+        previous.type == TokenType.leftSquare ||
+        previous.type == TokenType.semicolon ||
+        previous.type == TokenType.lineBreak ||
+        previous.type == TokenType.comma ||
+        previous.type == TokenType.verticalBar ||
+        previous.type == TokenType.plus ||
+        previous.type == TokenType.minus ||
+        previous.type == TokenType.star ||
+        previous.type == TokenType.slash ||
+        previous.type == TokenType.exp ||
+        previous.type == TokenType.invertedSlash ||
+        previous.type == TokenType.approx ||
+        previous.type == TokenType.not ||
+        previous.type == TokenType.and ||
+        previous.type == TokenType.or ||
+        previous.type == TokenType.identicallyEquals ||
+        previous.type == TokenType.equals ||
+        previous.type == TokenType.assigment ||
+        previous.type == TokenType.less ||
+        previous.type == TokenType.lessEqual ||
+        previous.type == TokenType.greater ||
+        previous.type == TokenType.greaterEqual ||
+        previous.type == TokenType.belongs ||
+        previous.type == TokenType.contained ||
+        previous.type == TokenType.disjoined ||
+        previous.type == TokenType.elseToken ||
+        previous.type == TokenType.intersection ||
+        previous.type == TokenType.print ||
+        previous.type == TokenType.returnToken ||
+        previous.type == TokenType.union) return true;
+
+    //these first two guarantee binary because they apply
+    //to the expression that precedes then
+    if (previous.type == TokenType.apostrophe ||
+        previous.type == TokenType.factorial ||
+        //for now guarantees binary because it only shows up
+        //on interval definitions
+        previous.type == TokenType.rightSquare ||
+        previous.type == TokenType.identifier ||
+        previous.type == TokenType.number ||
+        previous.type == TokenType.thisToken ||
+        //doesn't make sense, because you can't subtract from these things,
+        //but we can format it to look pretty anyway
+        previous.type == TokenType.string ||
+        previous.type == TokenType.falseToken ||
+        previous.type == TokenType.nil ||
+        previous.type == TokenType.trueToken ||
+        previous.type == TokenType.unknown) return false;
+
+    // ')' and '}' are a special kind of hell because of these things:
+    // if(variable)-otherVariable; -> unary
+    // BUT
+    // (variable)-otherVariable; -> binary
+    //and
+    // if(variable){variable=variable+1}-otherVariable; -> unary
+    //BUT
+    // {1,2,3}-(1.5, 2.5) -> binary
+
+    //the easy way, since the unary case for both is kinda meaningless, would be to assume binary
+    //however, since it is not invalid, and i might add operator overloads sometime, we can't assume
+    //no one will ever write it.
+
+    //for this, the token right before the parentheses was opened (excluding comments)
+    //will determine wheter it was unary or binary: if it is 'if', 'while' or 'for', it is unary
+    //and if it is anything else, it is binary. it is also binary if the parentheses actually is closing a
+    //left square bracket, because then it is an left-closed right-open interval definition
+    if (previous.type == TokenType.rightParentheses) {
+      var unopenedBrackets = 1;
+      --i;
+      while (i >= 0) {
+        final type = _tokens[i].type;
+        if (type == TokenType.rightParentheses ||
+            type == TokenType.rightSquare) {
+          ++unopenedBrackets;
+        } else if (type == TokenType.leftParentheses ||
+            type == TokenType.leftSquare) --unopenedBrackets;
+        //found start of group/parenthesized clause
+        if (unopenedBrackets == 0) {
+          //was interval!
+          if (type == TokenType.leftSquare) return false;
+          break;
+        }
+        --i;
+      }
+      --i;
+      //ignore comments
+      while (i >= 0) {
+        TokenType aux = _tokens[i].type;
+        if (aux != TokenType.comment &&
+            aux != TokenType.hash &&
+            aux != TokenType.multilineComment &&
+            aux != TokenType.wordComment) {
+          break;
+        }
+        --i;
+      }
+      //parentheses is unopened/opened right at the beggining -> binary
+      if (i <= 0) return false;
+
+      TokenType typeBeforeOpening = _tokens[i].type;
+      return typeBeforeOpening == TokenType.ifToken ||
+          typeBeforeOpening == TokenType.whileToken ||
+          typeBeforeOpening == TokenType.forToken;
+      //need to make sure we're not taking a comment
+    }
+
+    //if we were parsing a block, it's unary
+    //if it was a set, it's binary
+    if (previous.type == TokenType.rightBrace) {
+      return _lastParsed == Parsing.blockStmt;
+    }
+
+    //the token types which would reach this point are:
+    //  dot ('.')
+    //  classToken ('class')
+    //  del ('del' or '∂')
+    //  ifToken('if')
+    //  forToken('for')
+    //  let('let')
+    //  routine('routine')
+    //  setToken('set')
+    //  superToken('super')
+    //  whileToken('while')
+    //  EOF(end of file)
+    //which are all syntax errors anyway, so who cares
+    return true;
   }
 
-  visitCommentExpr(CommentExpr commentExpr) {}
+  void _processLinebreak() {
+    //in principle, ignores linebreaks inside for clauses
+
+    if (_stack.last == Parsing.forclause) return;
+    _retStr +=
+        ((_currentLine == _indent * _indentLevel) ? "" : _currentLine) + '\n';
+    _currentLine = (_next.type == TokenType.rightBrace)
+        ? _indent * (_indentLevel - 1)
+        : _indent * _indentLevel;
+  }
 }

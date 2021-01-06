@@ -25,7 +25,6 @@ class FormatterScanner extends BSScanner {
         }
         //consumes those last  '*/' characters
         advance();
-        advance();
         addToken(TokenType.multilineComment);
       } else //in any other case we just have a normal slash
         addToken(TokenType.slash);
@@ -40,5 +39,55 @@ class FormatterScanner extends BSScanner {
 
       addToken(TokenType.wordComment);
     };
+    charToLexeme['\n'] = () {
+      if (!tokens.isEmpty) {
+        TokenType last = tokens.last.type;
+        if (![
+              TokenType.leftParentheses, //(
+              TokenType.leftBrace, // [
+              TokenType.leftSquare, // {
+              TokenType.comma, // ,
+              TokenType.dot, // .
+              TokenType.minus, // -
+              TokenType.plus, // +
+              // TokenType.semicolon, // ;
+              TokenType.slash, // /
+              TokenType.star, // *
+              TokenType.approx, // ~
+              TokenType.exp, // ^
+              TokenType.verticalBar, // |
+              TokenType.assigment, // =
+              TokenType.equals, // ==
+              TokenType.identicallyEquals, // ===
+              TokenType.greater, // >
+              TokenType.greaterEqual, // >=
+              TokenType.less, // <\n
+              TokenType.lessEqual, // <=
+              TokenType.and, // and
+              TokenType.or, // or
+              TokenType.not, // not
+              TokenType.elseToken, // else
+              TokenType.contained, // contained
+              TokenType.disjoined, // disjoined
+              TokenType.belongs, // belongs
+              TokenType.setToken, // set
+              TokenType.union, // union
+              TokenType.intersection, // intersection
+            ].contains(last) &&
+            !(last == TokenType.lineBreak &&
+                (tokens.length < 2 ||
+                    tokens[tokens.length - 2].type == TokenType.lineBreak)))
+          addToken(TokenType.lineBreak);
+      }
+      line++;
+    };
+  }
+
+  @override
+  void removeLinebreaks() {
+    super.removeLinebreaks();
+    while (tokens.length > 2 &&
+        tokens[tokens.length - 2].type == TokenType.lineBreak)
+      tokens.removeAt(tokens.length - 2);
   }
 }
