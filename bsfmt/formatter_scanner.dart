@@ -1,5 +1,5 @@
-import '../betascript/source/interpreter/scanner.dart';
-import '../betascript/source/interpreter/token.dart';
+import '../../betascript/source/interpreter/scanner.dart';
+import '../../betascript/source/interpreter/token.dart';
 
 class FormatterScanner extends BSScanner {
   FormatterScanner(String source, Function errorCallback)

@@ -3,7 +3,7 @@ import 'dart:io';
 
 import 'file_formatter.dart';
 import 'formatter_scanner.dart';
-import '../betascript/source/interpreter/token.dart';
+import '../../betascript/source/interpreter/token.dart';
 
 class Formatter {
   String _indent;
