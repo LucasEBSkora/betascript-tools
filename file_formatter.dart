@@ -1,6 +1,6 @@
 import 'dart:collection' show Queue;
 
-import '../../betascript/source/interpreter/token.dart';
+import '../betascript/source/interpreter/token.dart';
 
 //represents what we are currently "parsing"
 //(but only for things that will change the behavior)
