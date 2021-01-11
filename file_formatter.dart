@@ -130,6 +130,8 @@ class FileFormatter {
           _lastParsed = _stack.removeLast();
         }
         return ')';
+      case TokenType.identicallyEquals:
+        return '≡';
       default:
         return t.lexeme;
     }
